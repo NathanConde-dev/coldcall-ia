@@ -99,7 +99,7 @@ app.post("/make-call", async (req, res) => {
 
     try {
         const call = await client.calls.create({
-            url: "http://your-server-url/webhook/twilio-calls",
+            url: "http://your-ngrok-url/webhook/twilio-calls", // Atualize com o URL do seu ngrok
             to,
             from: process.env.TWILIO_PHONE_NUMBER,
         });
@@ -111,7 +111,13 @@ app.post("/make-call", async (req, res) => {
     }
 });
 
+// Rota para testar conexão com o Dev Phone
+app.get("/", (req, res) => {
+    res.send("Servidor está rodando! Pronto para integrar com o Twilio Dev Phone.");
+});
+
 // Iniciar o servidor
 app.listen(PORT, () => {
     console.log(`Servidor rodando na porta ${PORT}`);
+    console.log("Exponha seu servidor usando ngrok para conectar ao Twilio Dev Phone.");
 });
