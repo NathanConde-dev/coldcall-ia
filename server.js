@@ -4,120 +4,141 @@ const twilio = require("twilio");
 const dotenv = require("dotenv");
 const axios = require("axios");
 
-// Carregar variáveis de ambiente
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
 
-// Configurar o body-parser para receber dados do Twilio
+// Configuração do Body Parser para o Twilio
 app.use(bodyParser.urlencoded({ extended: false }));
 
-// Configurar cliente Twilio
+// Configuração da porta
+const PORT = process.env.PORT || 3000;
+
+// Configuração do Twilio
 const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
-// Rota para receber chamadas Twilio
-app.post("/webhook/twilio-calls", (req, res) => {
-    const { From, To } = req.body;
+// Rota principal para chamadas do Twilio
+app.post("/webhook/twilio-calls", async (req, res) => {
+  const { From, To } = req.body;
 
-    console.log(`Chamada recebida de: ${From}, para: ${To}`);
+  console.log(`Chamada recebida de: ${From}, para: ${To}`);
 
-    // Responder à chamada com TwiML (Twilio Markup Language)
+  res.set("Content-Type", "text/xml");
+  res.send(`
+    <Response>
+      <Say voice="alice">Olá! Obrigado por ligar. Por favor, diga sua mensagem após o sinal.</Say>
+      <Pause length="2" />
+      <Gather input="speech" action="/process-input" method="POST">
+        <Say>Estou ouvindo...</Say>
+      </Gather>
+    </Response>
+  `);
+});
+
+// Rota para processar a entrada do usuário e utilizar a API Realtime da OpenAI
+app.post("/process-input", async (req, res) => {
+  const { SpeechResult } = req.body;
+
+  if (!SpeechResult || SpeechResult.trim() === "") {
+    console.log("Nenhuma mensagem foi capturada.");
     res.set("Content-Type", "text/xml");
     res.send(`
-        <Response>
-            <Say voice="alice">Olá, obrigado por ligar. Como posso ajudar?</Say>
-            <Pause length="2" />
-            <Gather input="speech" action="/process-input" method="POST">
-                <Say>Por favor, diga sua mensagem após o sinal.</Say>
-            </Gather>
-        </Response>
+      <Response>
+        <Say voice="alice">Desculpe, não consegui entender. Por favor, tente novamente.</Say>
+        <Hangup />
+      </Response>
     `);
+    return;
+  }
+
+  console.log(`Mensagem recebida: ${SpeechResult}`);
+
+  try {
+    // Enviar o texto para a API de Realtime da OpenAI
+    const response = await axios.post(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        model: "gpt-4",
+        messages: [
+          { role: "system", content: "Você é um assistente de atendimento telefônico." },
+          { role: "user", content: SpeechResult },
+        ],
+        stream: true,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        responseType: "stream",
+      }
+    );
+
+    let chatResponse = "";
+
+    // Processar a resposta em tempo real
+    response.data.on("data", (chunk) => {
+      const lines = chunk.toString().split("\n").filter((line) => line.trim() !== "");
+      for (const line of lines) {
+        const parsed = JSON.parse(line.replace(/^data: /, ""));
+        if (parsed.choices && parsed.choices[0].delta && parsed.choices[0].delta.content) {
+          chatResponse += parsed.choices[0].delta.content;
+        }
+      }
+    });
+
+    response.data.on("end", () => {
+      console.log(`Resposta da OpenAI: ${chatResponse}`);
+
+      // Responder ao Twilio com a mensagem completa
+      res.set("Content-Type", "text/xml");
+      res.send(`
+        <Response>
+          <Say voice="alice">${chatResponse}</Say>
+          <Hangup />
+        </Response>
+      `);
+    });
+
+  } catch (error) {
+    console.error("Erro ao processar mensagem:", error);
+
+    res.set("Content-Type", "text/xml");
+    res.send(`
+      <Response>
+        <Say voice="alice">Desculpe, ocorreu um erro ao processar sua solicitação. Tente novamente mais tarde.</Say>
+        <Hangup />
+      </Response>
+    `);
+  }
 });
 
-// Rota para processar entrada do usuário
-app.post("/process-input", async (req, res) => {
-    const { SpeechResult } = req.body;
+// Rota para iniciar chamadas de teste com o Dev Phone
+app.post("/dev-phone/call", async (req, res) => {
+  const to = req.body.to || process.env.DEV_PHONE_NUMBER;
 
-    if (!SpeechResult || SpeechResult.trim() === "") {
-        console.log("Nenhuma mensagem foi capturada.");
-        res.set("Content-Type", "text/xml");
-        res.send(`
-            <Response>
-                <Say voice="alice">Desculpe, não consegui entender. Por favor, tente novamente.</Say>
-                <Hangup />
-            </Response>
-        `);
-        return;
-    }
+  try {
+    const call = await client.calls.create({
+      url: `${process.env.BASE_URL}/webhook/twilio-calls`, // URL do webhook
+      to, // Número do Dev Phone
+      from: process.env.TWILIO_PHONE_NUMBER, // Número Twilio configurado
+    });
 
-    console.log(`Mensagem recebida: ${SpeechResult}`);
-
-    try {
-        // Enviar mensagem para o ChatGPT
-        const response = await axios.post(
-            "https://api.openai.com/v1/chat/completions",
-            {
-                model: "gpt-3.5-turbo",
-                messages: [{ role: "user", content: SpeechResult }],
-            },
-            {
-                headers: {
-                    Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-                },
-            }
-        );
-
-        const chatResponse = response.data.choices[0].message.content;
-
-        console.log(`Resposta do ChatGPT: ${chatResponse}`);
-
-        // Responder ao Twilio com a mensagem do ChatGPT
-        res.set("Content-Type", "text/xml");
-        res.send(`
-            <Response>
-                <Say voice="alice">${chatResponse}</Say>
-                <Hangup />
-            </Response>
-        `);
-    } catch (error) {
-        console.error("Erro ao processar mensagem:", error);
-
-        res.set("Content-Type", "text/xml");
-        res.send(`
-            <Response>
-                <Say voice="alice">Desculpe, ocorreu um erro ao processar sua solicitação. Tente novamente mais tarde.</Say>
-                <Hangup />
-            </Response>
-        `);
-    }
+    console.log(`Chamada de teste iniciada: Call SID ${call.sid}`);
+    res.json({ message: "Chamada de teste iniciada com sucesso.", callSid: call.sid });
+  } catch (error) {
+    console.error("Erro ao iniciar chamada de teste:", error);
+    res.status(500).json({ error: "Erro ao iniciar chamada de teste." });
+  }
 });
 
-// Rota para iniciar uma chamada de teste
-app.post("/make-call", async (req, res) => {
-    const { to } = req.body;
-
-    try {
-        const call = await client.calls.create({
-            url: "http://your-ngrok-url/webhook/twilio-calls", // Atualize com o URL do seu ngrok
-            to,
-            from: process.env.TWILIO_PHONE_NUMBER,
-        });
-
-        res.json({ message: "Chamada iniciada", callSid: call.sid });
-    } catch (error) {
-        console.error("Erro ao fazer chamada:", error);
-        res.status(500).json({ error: "Erro ao fazer chamada" });
-    }
-});
-
-// Rota para testar conexão com o Dev Phone
+// Rota padrão para testar o servidor
 app.get("/", (req, res) => {
-    res.send("Servidor está rodando! Pronto para integrar com o Twilio Dev Phone.");
+  res.send("Servidor está rodando! Configure o Dev Phone para testar chamadas.");
 });
 
 // Iniciar o servidor
 app.listen(PORT, () => {
-    console.log(`Servidor rodando na porta ${PORT}`);
-    console.log("Exponha seu servidor usando ngrok para conectar ao Twilio Dev Phone.");
+  console.log(`Servidor rodando na porta ${PORT}`);
+  console.log("Pronto para integração com o Twilio Dev Phone.");
 });
